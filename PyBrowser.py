@@ -3,16 +3,16 @@ import json
 import subprocess
 import platform
 import os
-from PyQt5.QtGui import QIcon, QKeySequence
+from PyQt5.QtGui import QIcon, QKeySequence, QFont
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QLineEdit, QPushButton, QHBoxLayout,
                              QVBoxLayout, QWidget, QTabWidget, QFileDialog, QDialog,
-                             QLabel, QProgressBar, QMenu, QMessageBox, QStyleFactory, QComboBox, QSpinBox, QAction, QDialogButtonBox)
+                             QLabel, QProgressBar, QMenu, QMessageBox, QStyleFactory, QComboBox, QSpinBox, QAction, QDialogButtonBox, QInputDialog)
 from PyQt5.QtCore import QUrl, Qt, QSize, QProcess, QObject
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineDownloadItem, QWebEnginePage, QWebEngineProfile
 from PyQt5.QtWebChannel import QWebChannel
 
 # Define the current version of the application
-CURRENT_VERSION = "v5.1"
+CURRENT_VERSION = "v6.1"
 
 print(f"Application current version: {CURRENT_VERSION}")
 
@@ -185,6 +185,9 @@ class BrowserWindow(QWebEngineView):
         self.channel.registerObject('jsAPI', self.js_api)
         self.page().setWebChannel(self.channel)
 
+        # Inject dark mode status on page load
+        self.loadFinished.connect(self.inject_dark_mode_status)
+
     def on_load_finished(self, success: bool):
         try:
             if not success:
@@ -245,6 +248,18 @@ class BrowserWindow(QWebEngineView):
         context_menu.addAction("New Tab", self.main_window.add_tab)
         context_menu.addAction("Close Tab", lambda: self.main_window.close_tab(self.main_window.tab_widget.currentIndex()))
         context_menu.exec_(self.mapToGlobal(event.pos()))
+
+    def inject_dark_mode_status(self):
+        is_dark_mode = self.main_window.settings.get('theme', 'Light') == 'Dark'
+        js_code = f"""
+        (function() {{
+            var isDarkMode = {str(is_dark_mode).lower()};
+            document.documentElement.style.setProperty('--is-dark-mode', isDarkMode);
+            var event = new CustomEvent('darkModeChanged', {{ detail: {{ isDarkMode: isDarkMode }} }});
+            document.dispatchEvent(event);
+        }})();
+        """
+        self.page().runJavaScript(js_code)
 
 class SettingsWindow(QDialog):
     def __init__(self, parent=None):
@@ -330,10 +345,7 @@ class SettingsWindow(QDialog):
 
     def change_theme(self, index: int):
         theme = self.theme_combo.currentText()
-        if theme == "Dark":
-            apply_dark_theme(QApplication.instance())
-        elif theme == "Light":
-            apply_light_theme(QApplication.instance())
+        self.main_window.change_theme(theme)
 
     def clear_history(self):
         self.main_window.history = []
@@ -491,7 +503,7 @@ class MainWindow(QMainWindow):
                 sys.exit()
         if self.profile:
             self.load_user_data()
-        self.setWindowTitle(f'PyBrowser {CURRENT_VERSION}')  # Updated window title
+        self.setWindowTitle(f'PyBrowser {CURRENT_VERSION} - {self.profile["first_name"]} {self.profile["last_name"]}')  # Updated window title
         self.setWindowIcon(QIcon("icon.png"))  # Set the window icon
         self.setup_ui()
         self.restore_window_settings()
@@ -509,23 +521,44 @@ class MainWindow(QMainWindow):
         self.url_bar.setPlaceholderText("Enter URL and press Enter")
         self.url_bar.returnPressed.connect(self.navigate)
 
-        button_size = QSize(50, 32)  # Revert button size for navigation bar
-        self.back_button = QPushButton('<')
-        self.forward_button = QPushButton('>')
-        self.reload_button = QPushButton('R')
-        self.add_tab_button = QPushButton('+')
-        self.menu_button = QPushButton('☰')
+        button_size = QSize(80, 32)  # Increased button size for better visibility
+        font = QFont()
+        font.setPointSize(10)  # Set font size for better visibility
 
-        self.back_button.setFixedSize(button_size)
-        self.forward_button.setFixedSize(button_size)
-        self.reload_button.setFixedSize(button_size)
-        self.add_tab_button.setFixedSize(button_size)
-        self.menu_button.setFixedSize(button_size)
+        self.back_button = QPushButton('<')
+        self.back_button.setMinimumSize(button_size)
+        self.back_button.setFont(font)
+
+        self.forward_button = QPushButton('>')
+        self.forward_button.setMinimumSize(button_size)
+        self.forward_button.setFont(font)
+
+        self.reload_button = QPushButton('R')
+        self.reload_button.setMinimumSize(button_size)
+        self.reload_button.setFont(font)
+
+        self.add_tab_button = QPushButton('+')
+        self.add_tab_button.setMinimumSize(button_size)
+        self.add_tab_button.setFont(font)
+
+        self.menu_button = QPushButton('☰')
+        self.menu_button.setMinimumSize(button_size)
+        self.menu_button.setFont(font)
+
+        self.tab_group_button = QPushButton('Group Tabs')
+        self.tab_group_button.setMinimumSize(button_size)
+        self.tab_group_button.setFont(font)
+
+        self.tab_search_button = QPushButton('Search Tabs')
+        self.tab_search_button.setMinimumSize(button_size)
+        self.tab_search_button.setFont(font)
 
         self.back_button.clicked.connect(self.navigate_back)
         self.forward_button.clicked.connect(self.navigate_forward)
         self.reload_button.clicked.connect(self.reload_page)
         self.add_tab_button.clicked.connect(self.add_tab)
+        self.tab_group_button.clicked.connect(self.group_tabs)
+        self.tab_search_button.clicked.connect(self.search_tabs)
 
         self.menu = QMenu()
         self.menu.addAction('Settings', self.show_settings)
@@ -540,6 +573,8 @@ class MainWindow(QMainWindow):
         top_layout.addWidget(self.url_bar)
         top_layout.addWidget(self.add_tab_button)
         top_layout.addWidget(self.menu_button)
+        top_layout.addWidget(self.tab_group_button)
+        top_layout.addWidget(self.tab_search_button)
 
         container_widget = QWidget()
         container_layout = QVBoxLayout(container_widget)
@@ -601,6 +636,16 @@ class MainWindow(QMainWindow):
         exit_action.triggered.connect(self.close)
         self.addAction(exit_action)
 
+        group_tabs_action = QAction(self)
+        group_tabs_action.setShortcut(QKeySequence("Ctrl+G"))
+        group_tabs_action.triggered.connect(self.group_tabs)
+        self.addAction(group_tabs_action)
+
+        search_tabs_action = QAction(self)
+        search_tabs_action.setShortcut(QKeySequence("Ctrl+F"))
+        search_tabs_action.triggered.connect(self.search_tabs)
+        self.addAction(search_tabs_action)
+
     def show_help(self):
         help_text = """
         <h1>PyBrowser Help</h1>
@@ -612,6 +657,8 @@ class MainWindow(QMainWindow):
             <li><b>New Tab:</b> Ctrl + T</li>
             <li><b>Close Tab:</b> Ctrl + W</li>
             <li><b>Toggle Full Screen:</b> F11</li>
+            <li><b>Group Tabs:</b> Ctrl + G</li>
+            <li><b>Search Tabs:</b> Ctrl + F</li>
         </ul>
         <h2>Other Shortcuts</h2>
         <ul>
@@ -650,6 +697,20 @@ class MainWindow(QMainWindow):
         for i in range(self.tab_widget.count()):
             browser = self.tab_widget.widget(i)
             browser.setZoomFactor(default_zoom / 100)
+
+        # Apply theme immediately
+        theme = self.settings.get('theme', 'Light')
+        self.change_theme(theme)
+
+    def change_theme(self, theme):
+        if theme == "Dark":
+            apply_dark_theme(QApplication.instance())
+        elif theme == "Light":
+            apply_light_theme(QApplication.instance())
+        # Inject dark mode status for all open tabs
+        for i in range(self.tab_widget.count()):
+            browser = self.tab_widget.widget(i)
+            browser.inject_dark_mode_status()
 
     def update_startup_page(self):
         search_engine = self.settings.get('search_engine', 'Google')
@@ -963,6 +1024,24 @@ class MainWindow(QMainWindow):
         if self.history_browser is None:
             self.history_browser = self.add_tab("about:history")
         self.history_browser.setHtml(history_html)
+
+    def group_tabs(self):
+        group_name, ok = QInputDialog.getText(self, 'Group Tabs', 'Enter a group name:')
+        if ok and group_name:
+            for i in range(self.tab_widget.count()):
+                widget = self.tab_widget.widget(i)
+                if self.tab_widget.tabText(i).startswith(group_name):
+                    continue
+                self.tab_widget.setTabText(i, f"{group_name}: {self.tab_widget.tabText(i)}")
+
+    def search_tabs(self):
+        search_text, ok = QInputDialog.getText(self, 'Search Tabs', 'Enter text to search in tabs:')
+        if ok and search_text:
+            for i in range(self.tab_widget.count()):
+                widget = self.tab_widget.widget(i)
+                if search_text.lower() in self.tab_widget.tabText(i).lower():
+                    self.tab_widget.setCurrentIndex(i)
+                    break
 
     def closeEvent(self, event):
         self.save_window_settings()
