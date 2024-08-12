@@ -6,7 +6,7 @@ import os
 from PyQt5.QtGui import QIcon, QKeySequence, QFont
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QLineEdit, QPushButton, QHBoxLayout,
                              QVBoxLayout, QWidget, QTabWidget, QFileDialog, QDialog,
-                             QLabel, QProgressBar, QMenu, QMessageBox, QStyleFactory, QComboBox, QSpinBox, QAction, QDialogButtonBox, QInputDialog)
+                             QLabel, QProgressBar, QMenu, QMessageBox, QStyleFactory, QComboBox, QSpinBox, QAction, QDialogButtonBox, QInputDialog, QScrollArea)
 from PyQt5.QtCore import QUrl, Qt, QSize, QProcess, QObject
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineDownloadItem, QWebEnginePage, QWebEngineProfile
 from PyQt5.QtWebChannel import QWebChannel
@@ -123,18 +123,22 @@ class JavaScriptAPI(QObject):
     pass
 
 class DownloadDialog(QDialog):
-    def __init__(self, filename: str, path: str, parent=None):
+    def __init__(self, filename: str, path: str, main_window, parent=None):
         super().__init__(parent)
         self.setWindowTitle('Download Progress')
         self.setWindowModality(Qt.ApplicationModal)
+        self.main_window = main_window
         self.filename_label = QLabel(f'File: {filename}')
         self.path_label = QLabel(f'Save to: {path}')
         self.progress_bar = QProgressBar()
         self.progress_bar.setValue(0)
+        self.manage_downloads_button = QPushButton('Manage Downloads')
+        self.manage_downloads_button.clicked.connect(self.open_download_manager)
         layout = QVBoxLayout()
         layout.addWidget(self.filename_label)
         layout.addWidget(self.path_label)
         layout.addWidget(self.progress_bar)
+        layout.addWidget(self.manage_downloads_button)
         self.setLayout(layout)
 
     def update_progress(self, received: int, total: int):
@@ -147,8 +151,123 @@ class DownloadDialog(QDialog):
         msg_box.setWindowTitle('Download Complete')
         msg_box.setText('The download is complete.')
         msg_box.setStandardButtons(QMessageBox.Ok)
-        msg_box.buttonClicked.connect(self.close)
+        msg_box.buttonClicked.connect(self.close_dialog)
         msg_box.exec_()
+
+    def download_canceled(self):
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle('Download Canceled')
+        msg_box.setText('The download was canceled.')
+        msg_box.setStandardButtons(QMessageBox.Ok)
+        msg_box.buttonClicked.connect(self.close_dialog)
+        msg_box.exec_()
+
+    def open_download_manager(self):
+        self.main_window.show_download_manager()
+        self.hide()
+
+    def close_dialog(self):
+        self.close()
+
+class DownloadItemWidget(QWidget):
+    def __init__(self, download_item, download_manager):
+        super().__init__()
+        self.download_item = download_item
+        self.is_canceled = False
+        self.is_paused = False  # New flag to track pause/resume state
+        self.download_manager = download_manager
+
+        self.layout = QHBoxLayout()
+        self.setLayout(self.layout)
+
+        self.filename_label = QLabel(self.download_item.suggestedFileName())
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setValue(0)
+        self.cancel_button = QPushButton("Cancel")
+        self.pause_resume_button = QPushButton("Pause")
+
+        self.layout.addWidget(self.filename_label)
+        self.layout.addWidget(self.progress_bar)
+        self.layout.addWidget(self.pause_resume_button)
+        self.layout.addWidget(self.cancel_button)
+
+        self.download_item.downloadProgress.connect(self.update_progress)
+        self.download_item.finished.connect(self.on_download_finished)
+
+        self.cancel_button.clicked.connect(self.cancel_download)
+        self.pause_resume_button.clicked.connect(self.pause_resume_download)  # Connect to the new method
+
+    def update_progress(self, bytes_received, bytes_total):
+        if bytes_total > 0:
+            progress = int((bytes_received / bytes_total) * 100)
+            self.progress_bar.setValue(progress)
+
+    def on_download_finished(self):
+        if not self.is_canceled:
+            self.progress_bar.setValue(100)
+            self.pause_resume_button.setEnabled(False)
+            self.cancel_button.setText("Remove")
+            self.cancel_button.clicked.disconnect()
+            self.cancel_button.clicked.connect(self.remove_download)
+        else:
+            self.progress_bar.setValue(0)
+            self.cancel_button.setText("Remove")
+            self.pause_resume_button.setEnabled(False)
+            self.cancel_button.clicked.disconnect()
+            self.cancel_button.clicked.connect(self.remove_download)
+
+    def pause_resume_download(self):
+        if not self.is_paused:
+            self.download_item.pause()  # Pause the download (PyQt5 supports pausing for certain protocols)
+            self.pause_resume_button.setText("Resume")
+            self.is_paused = True
+        else:
+            self.download_item.resume()  # Resume the download
+            self.pause_resume_button.setText("Pause")
+            self.is_paused = False
+
+    def cancel_download(self):
+        self.is_canceled = True
+        self.download_item.cancel()
+        self.on_download_finished()
+
+    def remove_download(self):
+        self.setParent(None)
+        self.deleteLater()
+        self.download_manager.check_no_downloads()
+
+class DownloadManagerDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Download Manager')
+        self.setMinimumSize(600, 400)
+
+        self.layout = QVBoxLayout()
+        self.setLayout(self.layout)
+
+        self.no_downloads_label = QLabel("No Downloads... Try downloading something perhaps?")
+        self.no_downloads_label.setAlignment(Qt.AlignCenter)
+        self.no_downloads_label.setStyleSheet("font-size: 16px; color: gray;")
+        self.layout.addWidget(self.no_downloads_label)
+
+        self.downloads_layout = QVBoxLayout()
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area_widget = QWidget()
+        self.scroll_area_widget.setLayout(self.downloads_layout)
+        self.scroll_area.setWidget(self.scroll_area_widget)
+
+        self.layout.addWidget(self.scroll_area)
+
+    def add_download(self, download_item):
+        if self.no_downloads_label.isVisible():
+            self.no_downloads_label.setVisible(False)
+        download_widget = DownloadItemWidget(download_item, self)
+        self.downloads_layout.addWidget(download_widget)
+
+    def check_no_downloads(self):
+        if self.downloads_layout.count() == 0:
+            self.no_downloads_label.setVisible(True)
 
 class WebEnginePage(QWebEnginePage):
     def __init__(self, browser):
@@ -222,13 +341,17 @@ class BrowserWindow(QWebEngineView):
         if path:
             download.setPath(path)
             download.accept()
-            download_dialog = DownloadDialog(suggested_filename, path, self)
+            self.main_window.download_manager_dialog.add_download(download)  # Add download to the manager
+            download_dialog = DownloadDialog(suggested_filename, path, self.main_window, self)
             download_dialog.show()
             download.downloadProgress.connect(download_dialog.update_progress)
-            download.finished.connect(lambda: self.download_complete(download_dialog))
+            download.finished.connect(lambda: self.download_complete(download_dialog, download))
 
-    def download_complete(self, download_dialog):
-        download_dialog.download_complete()
+    def download_complete(self, download_dialog, download):
+        if download.state() == QWebEngineDownloadItem.DownloadCancelled:
+            download_dialog.download_canceled()
+        else:
+            download_dialog.download_complete()
 
     def handle_fullscreen_requested(self, request):
         if request.toggleOn():
@@ -492,6 +615,8 @@ class MainWindow(QMainWindow):
         self.history = []
         self.profiles = self.load_profiles()
         self.profile = None
+        self.download_manager_dialog = DownloadManagerDialog(self)
+
         if not self.profiles:
             if not self.prompt_for_profile():
                 sys.exit()
@@ -517,11 +642,11 @@ class MainWindow(QMainWindow):
         self.url_bar = QLineEdit()
         self.url_bar.setPlaceholderText("Enter URL and press Enter")
         self.url_bar.returnPressed.connect(self.navigate)
-        self.url_bar.setMinimumHeight(32)  # Set minimum height to make it bigger
+        self.url_bar.setMinimumHeight(32)
 
-        button_size = QSize(80, 32)  # Increased button size for better visibility
+        button_size = QSize(80, 32)
         font = QFont()
-        font.setPointSize(10)  # Set font size for better visibility
+        font.setPointSize(10)
 
         self.back_button = QPushButton('Back')
         self.back_button.setMinimumSize(button_size)
@@ -551,7 +676,8 @@ class MainWindow(QMainWindow):
         self.menu = QMenu()
         self.menu.addAction('Settings', self.show_settings)
         self.menu.addAction('History', self.show_history)
-        self.menu.addAction('Switch User', self.switch_user)  # Add Switch User action
+        self.menu.addAction('Download Manager', self.show_download_manager)
+        self.menu.addAction('Switch User', self.switch_user)
         self.menu.addAction('Exit', self.close)
         self.menu_button.setMenu(self.menu)
 
@@ -619,10 +745,19 @@ class MainWindow(QMainWindow):
         history_action.triggered.connect(self.show_history)
         self.addAction(history_action)
 
+        download_manager_action = QAction(self)
+        download_manager_action.setShortcut(QKeySequence("Ctrl+D"))
+        download_manager_action.triggered.connect(self.show_download_manager)
+        self.addAction(download_manager_action)
+
         exit_action = QAction(self)
         exit_action.setShortcut(QKeySequence("Ctrl+Q"))
         exit_action.triggered.connect(self.close)
         self.addAction(exit_action)
+
+    def show_download_manager(self):
+        self.download_manager_dialog.show()
+        self.download_manager_dialog.check_no_downloads()
 
     def show_help(self):
         help_text = """
@@ -641,6 +776,7 @@ class MainWindow(QMainWindow):
             <li><b>Help:</b> F1</li>
             <li><b>Settings:</b> Ctrl + ,</li>
             <li><b>History:</b> Ctrl + H</li>
+            <li><b>Download Manager:</b> Ctrl + D</li>
             <li><b>Exit:</b> Ctrl + Q</li>
         </ul>
         """
