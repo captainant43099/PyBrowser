@@ -170,7 +170,7 @@ class DownloadDialog(QDialog):
         self.close()
 
 class DownloadItemWidget(QWidget):
-    def __init__(self, download_item, download_manager):
+    def __init__(self, download_item, download_manager, saved_state=None):
         super().__init__()
         self.download_item = download_item
         self.is_canceled = False
@@ -183,7 +183,8 @@ class DownloadItemWidget(QWidget):
         self.filename_label = QLabel(self.download_item.suggestedFileName())
         self.progress_bar = QProgressBar()
         self.progress_bar.setValue(0)
-        self.cancel_button = QPushButton("Cancel")
+        self.progress_bar.setFormat("%p%")  # Set format to show percentage
+        self.cancel_button = QPushButton("Remove")
         self.pause_resume_button = QPushButton("Pause")
 
         self.layout.addWidget(self.filename_label)
@@ -197,44 +198,70 @@ class DownloadItemWidget(QWidget):
         self.cancel_button.clicked.connect(self.cancel_download)
         self.pause_resume_button.clicked.connect(self.pause_resume_download)  # Connect to the new method
 
+        if saved_state:
+            self.load_state(saved_state)
+
     def update_progress(self, bytes_received, bytes_total):
         if bytes_total > 0:
             progress = int((bytes_received / bytes_total) * 100)
             self.progress_bar.setValue(progress)
+            self.save_state()
 
     def on_download_finished(self):
-        if not self.is_canceled:
-            self.progress_bar.setValue(100)
-            self.pause_resume_button.setEnabled(False)
-            self.cancel_button.setText("Remove")
-            self.cancel_button.clicked.disconnect()
-            self.cancel_button.clicked.connect(self.remove_download)
-        else:
-            self.progress_bar.setValue(0)
-            self.cancel_button.setText("Remove")
-            self.pause_resume_button.setEnabled(False)
-            self.cancel_button.clicked.disconnect()
-            self.cancel_button.clicked.connect(self.remove_download)
+        self.progress_bar.setValue(100)
+        self.progress_bar.setFormat("Download Completed")
+        self.pause_resume_button.setVisible(False)
+        self.cancel_button.setText("Remove")
+        self.cancel_button.clicked.disconnect()
+        self.cancel_button.clicked.connect(self.remove_download)
+        self.save_state()
 
     def pause_resume_download(self):
         if not self.is_paused:
-            self.download_item.pause()  # Pause the download (PyQt5 supports pausing for certain protocols)
+            self.download_item.pause()
             self.pause_resume_button.setText("Resume")
             self.is_paused = True
         else:
-            self.download_item.resume()  # Resume the download
+            self.download_item.resume()
             self.pause_resume_button.setText("Pause")
             self.is_paused = False
+        self.save_state()
 
     def cancel_download(self):
         self.is_canceled = True
         self.download_item.cancel()
-        self.on_download_finished()
+        self.progress_bar.setFormat("Download Canceled")
+        self.cancel_button.setText("Remove")
+        self.pause_resume_button.setEnabled(False)
+        self.cancel_button.clicked.disconnect()
+        self.cancel_button.clicked.connect(self.remove_download)
+        self.save_state()
 
     def remove_download(self):
         self.setParent(None)
         self.deleteLater()
         self.download_manager.check_no_downloads()
+        self.download_manager.remove_saved_state(self.filename_label.text())
+
+    def save_state(self):
+        state = {
+            'filename': self.filename_label.text(),
+            'progress': self.progress_bar.value(),
+            'is_paused': self.is_paused,
+            'is_canceled': self.is_canceled
+        }
+        self.download_manager.save_download_state(state)
+
+    def load_state(self, state):
+        self.progress_bar.setValue(state['progress'])
+        self.is_paused = state['is_paused']
+        self.is_canceled = state['is_canceled']
+        if self.is_paused:
+            self.pause_resume_button.setText("Resume")
+        if self.is_canceled:
+            self.progress_bar.setFormat("Download Canceled")
+            self.pause_resume_button.setEnabled(False)
+            self.cancel_button.setText("Remove")
 
 class DownloadManagerDialog(QDialog):
     def __init__(self, parent=None):
@@ -251,6 +278,8 @@ class DownloadManagerDialog(QDialog):
         self.layout.addWidget(self.no_downloads_label)
 
         self.downloads_layout = QVBoxLayout()
+        self.downloads_layout.setAlignment(Qt.AlignTop)
+
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area_widget = QWidget()
@@ -259,15 +288,40 @@ class DownloadManagerDialog(QDialog):
 
         self.layout.addWidget(self.scroll_area)
 
+        self.saved_state_file = "downloads.json"
+        self.load_saved_state()
+
     def add_download(self, download_item):
         if self.no_downloads_label.isVisible():
             self.no_downloads_label.setVisible(False)
         download_widget = DownloadItemWidget(download_item, self)
-        self.downloads_layout.addWidget(download_widget)
+        self.downloads_layout.insertWidget(0, download_widget)
+
+    def save_download_state(self, state):
+        all_states = self.load_saved_state()
+        all_states[state['filename']] = state
+        with open(self.saved_state_file, "w") as file:
+            json.dump(all_states, file)
+
+    def remove_saved_state(self, filename):
+        all_states = self.load_saved_state()
+        if filename in all_states:
+            del all_states[filename]
+            with open(self.saved_state_file, "w") as file:
+                json.dump(all_states, file)
+
+    def load_saved_state(self):
+        try:
+            with open(self.saved_state_file, "r") as file:
+                return json.load(file)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
 
     def check_no_downloads(self):
         if self.downloads_layout.count() == 0:
             self.no_downloads_label.setVisible(True)
+        else:
+            self.no_downloads_label.setVisible(False)
 
 class WebEnginePage(QWebEnginePage):
     def __init__(self, browser):
@@ -615,7 +669,7 @@ class MainWindow(QMainWindow):
         self.history = []
         self.profiles = self.load_profiles()
         self.profile = None
-        self.download_manager_dialog = DownloadManagerDialog(self)
+        self.download_manager_dialog = DownloadManagerDialog(self)  # Initialize download manager
 
         if not self.profiles:
             if not self.prompt_for_profile():
@@ -630,6 +684,7 @@ class MainWindow(QMainWindow):
         self.setup_ui()
         self.restore_window_settings()
         self.apply_settings()
+        self.download_manager_dialog.show()  # Show the download manager if necessary
 
     def setup_ui(self):
         self.tab_widget = QTabWidget()
