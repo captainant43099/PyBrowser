@@ -12,7 +12,7 @@ from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineDownloadItem, QWe
 from PyQt5.QtWebChannel import QWebChannel
 
 # Define the current version of the application
-CURRENT_VERSION = "v7.0"
+CURRENT_VERSION = "0.0 (Beta Build)"
 
 print(f"Application current version: {CURRENT_VERSION}")
 
