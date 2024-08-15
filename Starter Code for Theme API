@@ -1,0 +1,32 @@
+# PyBrowser Theme API
+
+## Creating a Theme
+
+You can create custom themes for PyBrowser by writing a CSS file that styles the browser's UI.
+
+### Example CSS File
+
+```css
+/* Filename: my_custom_theme.css */
+
+QWidget {
+    background-color: #282c34;
+    color: #abb2bf;
+}
+
+QLineEdit {
+    background-color: #1c1f26;
+    color: #ffffff;
+}
+
+QPushButton {
+    background-color: #61afef;
+    color: #ffffff;
+    border: none;
+}
+
+QPushButton:hover {
+    background-color: #528bff;
+}
+
+/* Add more custom styles here */
